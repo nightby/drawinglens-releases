@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 # DrawingLens installer — downloads the native dist from the public releases repo
 # (no Python required). Usage:
-#   curl -fsSL <raw>/install.sh | bash                     # installs dlens (CLI)
-#   curl -fsSL <raw>/install.sh | bash -s drawinglens-mcp  # installs MCP server
-#   curl -fsSL <raw>/install.sh | bash -s all              # both
+#   curl -fsSL <raw>/install.sh | bash                                   # dlens CLI
+#   curl -fsSL <raw>/install.sh | bash -s drawinglens-mcp                # MCP server
+#   curl -fsSL <raw>/install.sh | bash -s dlens --skills-dir <dir>       # + skill into YOUR skills dir
+#   curl -fsSL <raw>/install.sh | bash -s all --all-skills               # + skill into every detected agent home
 #
 # Layout: dist dirs live under DLENS_HOME (default ~/.local/share/drawinglens),
 # binaries are symlinked into BIN_DIR (default ~/.local/bin, or wherever an
 # existing installation was found). If BIN_DIR is not on PATH the installer
-# appends an export line to the user's shell rc. When installing dlens, the
-# SKILL.md is also propagated into every detected agent skills directory.
+# appends an export line to the user's shell rc.
 #
-# Env overrides: DLENS_HOME, BIN_DIR, NO_SKILL=1 (skip agent-skill propagation).
+# Skill placement is opt-in: --skills-dir writes SKILL.md into exactly that
+# skills dir (the calling agent's own); --all-skills writes it into every
+# detected agent home. Neither flag = program only.
+#
+# Env overrides: DLENS_HOME, BIN_DIR.
 set -euo pipefail
 
 REPO="nightby/drawinglens-releases"
 BASE="https://github.com/${REPO}/releases/latest/download"
 DLENS_HOME="${DLENS_HOME:-$HOME/.local/share/drawinglens}"
+SKILL_MARKER="drawinglens:skill_fingerprint"
 TMP=""
 
 cleanup() { [ -z "$TMP" ] || rm -rf "$TMP"; return 0; }
@@ -119,11 +124,33 @@ install_one() {
     ensure_path "$bin_dir"
 }
 
-# Propagate the agent skill into every detected host skills dir via the
-# installed CLI's canonical writer (keeps fingerprint/overwrite discipline).
-propagate_skill() {
-    [ "${NO_SKILL:-}" = "1" ] && return 0
-    local dlens="$1" host skills
+# Write the published SKILL.md into <skills_dir>/drawinglens/. Works for both
+# artifacts (no dlens binary needed). Refuses to clobber a foreign file: an
+# existing SKILL.md without our fingerprint marker is left untouched.
+write_skill() {
+    local skills_dir="$1" target tmp_skill
+    target="${skills_dir}/drawinglens"
+    if [ -L "${skills_dir}" ] || [ -L "${target}/SKILL.md" ]; then
+        echo "→ skill skipped for ${skills_dir}: refusing symlinked path"
+        return 0
+    fi
+    if [ -f "${target}/SKILL.md" ] && ! grep -q "$SKILL_MARKER" "${target}/SKILL.md"; then
+        echo "→ skill skipped for ${skills_dir}: existing SKILL.md is not a DrawingLens file"
+        return 0
+    fi
+    TMP="$(mktemp -d)"
+    tmp_skill="$TMP/SKILL.md"
+    curl -fsSL "${BASE}/SKILL.md" -o "$tmp_skill" || die "failed to download SKILL.md"
+    grep -q "$SKILL_MARKER" "$tmp_skill" || die "downloaded SKILL.md lacks the fingerprint marker"
+    mkdir -p "$target"
+    mv "$tmp_skill" "${target}/SKILL.md"
+    echo "→ skill installed: ${target}/SKILL.md"
+    rm -rf "$TMP"
+    TMP=""
+}
+
+write_skill_all_hosts() {
+    local host found=0
     for host in \
         "$HOME/.agents/skills" \
         "$HOME/.claude/skills" \
@@ -133,32 +160,39 @@ propagate_skill() {
         "$HOME/.copilot/skills" \
         "$HOME/.kiro/skills" \
         "$HOME/.codebuddy/skills"; do
-        # only where the host itself is present
         [ -d "$(dirname "$host")" ] || continue
-        if skills="$("$dlens" skill install --dir "$host" 2>&1)"; then
-            echo "→ skill installed: ${host}/drawinglens/SKILL.md"
-        else
-            echo "→ skill skipped for ${host}: ${skills}"
-        fi
+        found=1
+        write_skill "$host"
     done
+    [ "$found" = "1" ] || echo "→ no agent homes detected; skill not written"
 }
 
 main() {
     need curl
     need tar
-    local target="${1:-dlens}"
+    local target="dlens" skills_dir="" all_skills=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            dlens | drawinglens-mcp | all) target="$1" ;;
+            --skills-dir)
+                [ $# -ge 2 ] || die "--skills-dir expects a directory"
+                skills_dir="$2"
+                shift
+                ;;
+            --all-skills) all_skills=1 ;;
+            *) die "usage: install.sh [dlens|drawinglens-mcp|all] [--skills-dir DIR] [--all-skills]" ;;
+        esac
+        shift
+    done
     case "$target" in
         dlens | drawinglens-mcp) install_one "$target" ;;
         all)
             install_one dlens
             install_one drawinglens-mcp
             ;;
-        *) die "usage: install.sh [dlens|drawinglens-mcp|all]" ;;
     esac
-    # dlens carries `skill install`; propagate into detected agent homes.
-    case "$target" in
-        dlens | all) propagate_skill "$(pick_bin_dir dlens)/dlens" ;;
-    esac
+    [ -n "$skills_dir" ] && write_skill "$skills_dir"
+    [ "$all_skills" = "1" ] && write_skill_all_hosts
     echo "Done."
 }
 
