@@ -13,7 +13,7 @@ DLENS_HOME="${DLENS_HOME:-$HOME/.local/share/drawinglens}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 TMP=""
 
-cleanup() { [ -n "$TMP" ] && rm -rf "$TMP"; }
+cleanup() { [ -z "$TMP" ] || rm -rf "$TMP"; return 0; }
 trap cleanup EXIT
 
 die() { echo "install.sh: $*" >&2; exit 1; }
